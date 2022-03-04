@@ -212,6 +212,27 @@ void WorldSession::SendPacket(WorldPacket const* packet)
         return;
     }
 
+
+    // 2022-03-04 16:05
+    // FROM: grep -irn "BUILD_PLAYERBOT" * on mangos-wotlk
+    // TODO:  When a session sends a packet if it is the player make sure it gets distributed to the bots 
+    // Thesis: Again looks like the script manager hook is present, but problem is that bots do not have a socket, so need to find a solution for that?
+    /***
+     * mangos-wotlk:
+
+#ifdef BUILD_PLAYERBOT
+    // Send packet to bot AI
+    if (GetPlayer())
+    {
+        if (GetPlayer()->GetPlayerbotAI())
+            GetPlayer()->GetPlayerbotAI()->HandleBotOutgoingPacket(packet);
+        else if (GetPlayer()->GetPlayerbotMgr())
+            GetPlayer()->GetPlayerbotMgr()->HandleMasterOutgoingPacket(packet);
+    }
+#endif
+
+     */
+
     if (!m_Socket)
         return;
 
@@ -349,6 +370,21 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
                     opHandle->Call(this, *packet);
                     LogUnprocessedTail(packet);
                 }
+
+                // 2022-03-04 16:03 CET
+                // TODO: Ensure packet gets sent to the bots trough the manager.
+                // Thesis: Looks like the scriptmanager checks if $this can receive the packet and propagates it, maybe this can be used to all bots to exist in modules?
+
+                /***
+                 * mangos-wotlk:
+                 *
+
+                 #ifdef BUILD_PLAYERBOT
+                    if (_player && _player->GetPlayerbotMgr())
+                        _player->GetPlayerbotMgr()->HandleMasterIncomingPacket(*packet);
+                 #endif
+                ***/
+
                 break;
             case STATUS_TRANSFER:
                 if (_player && !_player->IsInWorld() && AntiDOS.EvaluateOpcode(*packet, currentTime))
@@ -458,6 +494,39 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
 
     ProcessQueryCallbacks();
 
+    // 2022-03-04 16:14
+    // TODO: Process player bot packets
+
+    /***
+     * mangos-wotlk:
+
+#ifdef BUILD_PLAYERBOT
+    // Process player bot packets
+    // The PlayerbotAI class adds to the packet queue to simulate a real player
+    // since Playerbots are known to the World obj only by its master's WorldSession object
+    // we need to process all master's bot's packets.
+    if (GetPlayer() && GetPlayer()->GetPlayerbotMgr())
+    {
+        for (PlayerBotMap::const_iterator itr = GetPlayer()->GetPlayerbotMgr()->GetPlayerBotsBegin();
+                itr != GetPlayer()->GetPlayerbotMgr()->GetPlayerBotsEnd(); ++itr)
+        {
+            Player* const botPlayer = itr->second;
+            WorldSession* const pBotWorldSession = botPlayer->GetSession();
+            while(!pBotWorldSession->m_recvQueue.empty())
+            {
+                auto const botpacket = std::move(pBotWorldSession->m_recvQueue.front());
+                pBotWorldSession->m_recvQueue.pop_front();
+
+                OpcodeHandler const& opHandle = opcodeTable[botpacket->GetOpcode()];
+                pBotWorldSession->ExecuteOpcode(opHandle, *botpacket);
+            }
+        }
+        GetPlayer()->GetPlayerbotMgr()->RemoveBots();
+    }
+#endif
+
+     */
+
     //check if we are safe to proceed with logout
     //logout procedure should happen only in World::UpdateSessions() method!!!
     if (updater.ProcessUnsafe())
@@ -548,6 +617,21 @@ void WorldSession::LogoutPlayer(bool save)
 
     if (_player)
     {
+
+       // 2022-03-04 16:15
+       // TODO: Logout all bots owned by the player
+
+       /***
+        * mangos-wotlk:
+
+#ifdef BUILD_PLAYERBOT
+        // Log out all player bots owned by this toon
+        if (_player->GetPlayerbotMgr())
+            _player->GetPlayerbotMgr()->LogoutAllBots(true);
+#endif
+
+        */
+
         if (ObjectGuid lguid = _player->GetLootGUID())
             DoLootRelease(lguid);
 
@@ -669,6 +753,29 @@ void WorldSession::LogoutPlayer(bool save)
         //! Call script hook before deletion
         sScriptMgr->OnPlayerLogout(_player);
 
+        // 2022-03-04 16:25
+        // TODO: Logout each bot properly as they will probably not get logged out on their own. Maybe just signal to the bots threat that its no longer controlled.
+        /***
+
+#ifdef BUILD_PLAYERBOT
+        // Remember player GUID for update SQL below
+        uint32 guid = _player->GetGUIDLow();
+#endif
+
+#ifdef BUILD_PLAYERBOT
+        // Set for only character instead of accountid
+        // Different characters can be alive as bots
+        SqlStatement stmt = CharacterDatabase.CreateStatement(updChars, "UPDATE characters SET online = 0 WHERE guid = ?");
+        stmt.PExecute(guid);
+#else
+        ///- Since each account can only have one online character at any given time, ensure all characters for active account are marked as offline
+        // No SQL injection as AccountId is uint32
+        stmt = CharacterDatabase.CreateStatement(updChars, "UPDATE characters SET online = 0 WHERE account = ?");
+        stmt.PExecute(GetAccountId());
+#endif
+
+         */
+
         METRIC_EVENT("player_events", "Logout", _player->GetName());
 
         LOG_INFO("entities.player", "Account: {} (IP: {}) Logout Character:[{}] ({}) Level: {}",
@@ -713,6 +820,29 @@ void WorldSession::KickPlayer(std::string const& reason, bool setKicked)
 
         m_Socket->CloseSocket();
     }
+
+    // 2022-03-04 16:27
+    // TODO: Logout the bot when kicked
+    /***
+
+#ifdef BUILD_PLAYERBOT
+    if (!_player)
+        return;
+
+    if (_player->GetPlayerbotAI())
+    {
+        auto master = _player->GetPlayerbotAI()->GetMaster();
+        auto botMgr = master->GetPlayerbotMgr();
+        if (botMgr)
+            botMgr->LogoutPlayerBot(_player->GetObjectGuid());
+    }
+    else
+        LogoutRequest(time(nullptr) - 20, false);
+#else
+    LogoutRequest(time(nullptr) - 20, false, true);
+#endif
+
+     */
 
     if (setKicked)
         SetKicked(true); // pussywizard: the session won't be left ingame for 60 seconds and to also kick offline session
